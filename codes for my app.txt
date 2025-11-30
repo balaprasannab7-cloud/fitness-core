@@ -1,0 +1,687 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import { RefreshCw, Zap, Shield, Heart, TrendingUp, Clock, AlertTriangle, CheckCircle, Moon, ArrowLeft, Youtube } from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, setDoc, onSnapshot } from 'firebase/firestore';
+
+// --- Global Setup (MANDATORY for Canvas Environment) ---
+// Initialize Firebase configuration and authentication token from environment variables
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+// Mock data is removed, and will be replaced by state derived from Firestore.
+const MOCK_ANALYSIS = [
+    { day: 'Mon', duration: 0, quality: 0 },
+    { day: 'Tue', duration: 0, quality: 0 },
+    { day: 'Wed', duration: 0, quality: 0 },
+    { day: 'Thu', duration: 0, quality: 0 },
+    { day: 'Fri', duration: 0, quality: 0 },
+    { day: 'Sat', duration: 0, quality: 0 },
+    { day: 'Sun', duration: 0, quality: 0 },
+];
+const MOCK_ENERGY_FORECAST = [
+    { time: '6 AM', level: 30 }, { time: '9 AM', level: 75 },
+    { time: '12 PM', level: 90 }, // Peak
+    { time: '3 PM', level: 50 },
+    { time: '6 PM', level: 85 }, // Optimal Workout Window
+    { time: '9 PM', level: 60 },
+    { time: '12 AM', level: 20 },
+];
+
+
+const App = () => {
+  // --- Firebase State ---
+  const [db, setDb] = useState(null);
+  const [auth, setAuth] = useState(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [userId, setUserId] = useState(null);
+  const [error, setError] = useState(null);
+
+  // --- App Data State ---
+  const [step, setStep] = useState(1);
+  const [privacyConsent, setPrivacyConsent] = useState(false);
+  const [isSensorReady, setIsSensorReady] = useState(true); // Default to true after initial check
+  const [isLoading, setIsLoading] = useState(false);
+  const [manualSleepDuration, setManualSleepDuration] = useState('');
+  
+  // Real sleep data state
+  const [sleepData, setSleepData] = useState({
+    duration: 0, // hours
+    quality: 0,   // %
+    deepSleep: 0, // hours
+    remSleep: 0, // hours
+  });
+
+  // --- Firebase Initialization & Authentication Effect ---
+  useEffect(() => {
+    if (!firebaseConfig.apiKey) return;
+
+    try {
+      const app = initializeApp(firebaseConfig);
+      const firestore = getFirestore(app);
+      const authentication = getAuth(app);
+      setDb(firestore);
+      setAuth(authentication);
+
+      // Listen for auth state changes
+      const unsubscribe = onAuthStateChanged(authentication, (user) => {
+        if (user) {
+          setUserId(user.uid);
+        } else {
+          setUserId(null);
+        }
+        setIsAuthReady(true);
+      });
+
+      // Sign in initially
+      const signInUser = async () => {
+        if (initialAuthToken) {
+          await signInWithCustomToken(authentication, initialAuthToken);
+        } else {
+          // Fallback to anonymous sign-in if no token is provided
+          await signInAnonymously(authentication);
+        }
+      };
+
+      signInUser();
+      return () => unsubscribe();
+    } catch (e) {
+      console.error("Firebase Initialization Error:", e);
+      setError("Failed to initialize the app. Check Firebase configuration.");
+      setIsAuthReady(true);
+    }
+  }, []);
+
+  // --- Firestore Listener Effect ---
+  useEffect(() => {
+    if (!isAuthReady || !userId || !db) return;
+
+    // Path: /artifacts/{appId}/users/{userId}/sleep_data/current
+    const sleepDocRef = doc(db, 
+        `artifacts/${appId}/users/${userId}/sleep_data`, 
+        'current'
+    );
+    
+    // Set up real-time listener for the current sleep data
+    const unsubscribe = onSnapshot(sleepDocRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setSleepData({
+          duration: data.duration || 0,
+          quality: data.quality || 0,
+          deepSleep: data.deepSleep || 0,
+          remSleep: data.remSleep || 0,
+        });
+      } else {
+        // Initialize with default data if the document doesn't exist
+        setSleepData({ duration: 0, quality: 0, deepSleep: 0, remSleep: 0 });
+        console.log("No sleep data found, initialized state to zero.");
+      }
+    }, (err) => {
+        console.error("Firestore Snapshot Error:", err);
+        setError("Failed to fetch real-time data.");
+    });
+
+    return () => unsubscribe();
+  }, [isAuthReady, userId, db]);
+
+
+  // --- Utility Functions ---
+
+  const simulateSensorCheck = useCallback(() => {
+    setIsLoading(true);
+    // Simulate API call or hardware check
+    setTimeout(() => {
+      setIsSensorReady(true);
+      setIsLoading(false);
+      setStep(3); // Move to Privacy Policy
+    }, 1500);
+  }, []);
+
+  const handlePrivacyConfirm = () => {
+    setPrivacyConsent(true);
+    setStep(4); // Move to Data Input
+  };
+
+  const handleManualInput = async (e) => {
+    e.preventDefault();
+    const duration = parseFloat(manualSleepDuration);
+
+    if (db && userId && duration > 0) {
+      setIsLoading(true);
+      try {
+        // Calculate very basic mock quality/deep sleep based on duration for demo
+        const quality = Math.min(100, Math.round(duration * 12 + Math.random() * 5));
+        const deepSleep = Math.min(duration / 3, duration * 0.25 + Math.random() * 0.1);
+        const remSleep = Math.min(duration / 3, duration * 0.25 + Math.random() * 0.1);
+        
+        // Save to Firestore
+        const sleepDocRef = doc(db, 
+            `artifacts/${appId}/users/${userId}/sleep_data`, 
+            'current'
+        );
+
+        await setDoc(sleepDocRef, {
+            timestamp: new Date().toISOString(),
+            duration: duration,
+            quality: quality,
+            deepSleep: parseFloat(deepSleep.toFixed(1)),
+            remSleep: parseFloat(remSleep.toFixed(1)),
+            source: 'manual',
+        }, { merge: true });
+
+        setManualSleepDuration(''); // Clear input
+        setStep(5); // Move to Dashboard
+      } catch (e) {
+        console.error("Error saving manual data: ", e);
+        setError("Failed to save sleep data to database.");
+      } finally {
+        setIsLoading(false);
+      }
+    } else {
+        setError("Database not ready or invalid duration entered.");
+    }
+  };
+
+  const handleDataSync = () => {
+    // In a real app, this would fetch from a wearable API
+    setError("Auto-Sync is disabled in this demo. Please use Manual Input.");
+  };
+
+  // 1. Start App / Initialization Trigger
+  useEffect(() => {
+    if (step === 1 && isAuthReady) {
+      // Skip the initial check screen if auth is ready for a smoother flow
+      setStep(isSensorReady ? 3 : 2); 
+    }
+    // If auth is ready and we are past the initial screens, move to dashboard
+    if (isAuthReady && userId && step > 4) {
+        setStep(5);
+    }
+  }, [step, isAuthReady, userId]);
+
+  // --- Recommendation Logic (Uses real 'sleepData') ---
+
+    const { duration, quality, deepSleep, remSleep } = sleepData;
+
+    // Calculation based on real data
+    const sleepScore = duration > 0 
+        ? Math.round(quality * 0.4 + (duration / 8) * 100 * 0.6) 
+        : 0;
+
+    const recoveryStatus = sleepScore >= 85 ? 'Optimal' : (sleepScore >= 70 ? 'Good' : 'Needs Rest');
+    const energyLevel = sleepScore >= 85 ? 'High' : (sleepScore >= 70 ? 'Medium' : 'Low');
+
+    // Emojified Recommendations
+    const workoutSuggestion = sleepScore === 0
+      ? "📝 Enter sleep data to get a personalized workout plan."
+      : recoveryStatus === 'Optimal'
+      ? "💪 High-Intensity Interval Training (HIIT). Your body is ready for peak performance."
+      : recoveryStatus === 'Good'
+      ? "🏋️ Moderate Strength Training. Focus on compound lifts and steady resistance."
+      : "🧘‍♀️ Active Recovery Day (Yoga/Light Cardio). Prioritize low-impact movement and stretching.";
+
+    const recoverySuggestion = sleepScore === 0
+      ? "😴 Track your sleep first! Good recovery starts with good data."
+      : recoveryStatus === 'Optimal'
+      ? "✨ Maintain routine: 15 min foam rolling and dynamic stretching before bed."
+      : recoveryStatus === 'Good'
+      ? "🧘 Targeted deep stretching for 30 minutes, focusing on major muscle groups."
+      : "🛌 Full rest is critical. Consider a nap or meditation session in the afternoon.";
+
+    const nutritionSuggestion = sleepScore === 0
+      ? "🍎 Focus on hydration and balanced meals until data is available."
+      : energyLevel === 'High'
+      ? "🍚 Fuel with complex carbs (oats, brown rice) and lean protein (chicken, tofu) to sustain peak energy."
+      : "🥑 Increase healthy fats (avocado, nuts) and hydration to boost energy levels and support recovery.";
+
+
+    const recommendationsData = [
+      { title: "Workout Plan", detail: workoutSuggestion, icon: Zap, color: "text-red-400" },
+      { title: "Recovery Strategy", detail: recoverySuggestion, icon: Heart, color: "text-blue-400" },
+      { title: "Nutrition Goal", detail: nutritionSuggestion, icon: Shield, color: "text-yellow-400" },
+    ];
+
+
+  // --- UI Components ---
+
+  const Header = () => (
+    <div className="bg-gray-900 p-4 shadow-lg sticky top-0 z-10 border-b border-green-700/50">
+      <h1 className="text-xl font-extrabold text-green-400 tracking-wider flex items-center">
+        <Moon className="w-6 h-6 mr-2"/>
+        FITNESSCORE
+        <span className="text-sm font-normal text-gray-400 ml-4">Sleep & Energy Tracker</span>
+      </h1>
+      <p className="text-xs text-gray-500 mt-1">
+        User ID: <span className="font-mono text-green-300 break-all">{userId || 'Loading...'}</span>
+      </p>
+    </div>
+  );
+
+  const Card = ({ title, icon: Icon, children, className = '' }) => (
+    <div className={`p-5 bg-gray-800 rounded-xl shadow-2xl transition-all duration-300 border border-gray-700 hover:border-green-600 ${className}`}>
+      <div className="flex items-center mb-3">
+        <Icon className="w-6 h-6 text-green-400 mr-3" />
+        <h2 className="text-lg font-semibold text-white">{title}</h2>
+      </div>
+      {children}
+    </div>
+  );
+    
+  const VideoCard = ({ title, description, videoId }) => (
+      <div className="bg-gray-700 p-4 rounded-xl shadow-inner border border-gray-600">
+          <div className="w-full h-32 bg-gray-600 flex items-center justify-center rounded-lg mb-3">
+              <Youtube className="w-8 h-8 text-red-500" />
+              <span className="text-white ml-2 text-sm">YouTube Placeholder</span>
+          </div>
+          <h4 className="text-lg font-semibold text-white truncate">{title}</h4>
+          <p className="text-sm text-gray-400 mt-1 mb-3">{description}</p>
+          <a 
+              href={`#video-link-${videoId}`} 
+              className="text-green-400 hover:text-green-300 font-medium text-sm mt-2 flex items-center"
+              onClick={(e) => { e.preventDefault(); console.log(`Simulated playback for video: ${title}`); }}
+          >
+              <Youtube className="w-4 h-4 mr-1"/> Watch Now
+          </a>
+      </div>
+  );
+
+  // --- 2. Initialization Sensor Screen ---
+  const SensorCheckScreen = () => (
+    <div className="flex flex-col items-center justify-center h-full min-h-[60vh] text-center p-8">
+      <div className="bg-gray-800 p-8 rounded-2xl shadow-xl w-full max-w-sm border border-gray-700">
+        {isLoading && (
+          <div className="flex flex-col items-center">
+            <RefreshCw className="w-10 h-10 text-green-400 animate-spin mb-4" />
+            <p className="text-white text-lg font-medium">Initializing Connection...</p>
+            <p className="text-gray-400 text-sm mt-1">Checking data access and database connection.</p>
+          </div>
+        )}
+        
+        {/* Simplified readiness check after Firebase setup */}
+        {!isLoading && isSensorReady && (
+          <div className="flex flex-col items-center">
+            <CheckCircle className="w-10 h-10 text-teal-400 mb-4" />
+            <p className="text-white text-lg font-medium">System Ready!</p>
+            <p className="text-gray-400 text-sm mt-1">Move to Privacy Confirmation.</p>
+          </div>
+        )}
+
+        {!isLoading && !isSensorReady && (
+          <div className="flex flex-col items-center">
+            <AlertTriangle className="w-10 h-10 text-red-500 mb-4" />
+            <p className="text-white text-lg font-medium mb-4">Connection Failed</p>
+            <p className="text-gray-400 text-sm mb-6">Could not establish database connection.</p>
+            <button
+              onClick={simulateSensorCheck}
+              className="px-6 py-2 bg-red-600 hover:bg-red-700 text-white font-bold rounded-full transition duration-150 shadow-lg"
+              disabled={isLoading}
+            >
+              {isLoading ? 'Retrying...' : 'Retry/Restart'}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  // --- 3. Privacy Policy Confirmation Screen ---
+  const PrivacyScreen = () => (
+    <div className="flex flex-col items-center justify-center h-full min-h-[60vh] text-center p-8">
+      <Card title="Privacy Policy & Consent" icon={Shield} className="max-w-xl">
+        <p className="text-gray-300 mb-4 text-sm">
+          This feature collects personal health-related data (sleep patterns, activity, heart rate) to provide personalized insights for your gym membership and health strategy.
+        </p>
+        <div className="max-h-60 overflow-y-auto bg-gray-700 p-4 rounded-lg text-left text-xs text-gray-400 mb-6">
+          <p className="font-bold text-white mb-2">Data Collected:</p>
+          <ul className="list-disc list-inside space-y-1">
+            <li>Sleep Duration (Total, Deep, REM)</li>
+            <li>Sleep Timing (Bedtime, Wake-up)</li>
+            <li>Resting Heart Rate during sleep</li>
+            <li>Activity Patterns (Wearable/Phone)</li>
+          </ul>
+          <p className="mt-3">
+            By clicking "I Agree," you confirm you have read and consent to the collection and use of this data solely for the purpose of generating personalized fitness and recovery recommendations within the FITNESSCORE application. Data is saved securely to your private document in Firestore.
+          </p>
+        </div>
+        <div className="flex justify-center">
+          <button
+            onClick={handlePrivacyConfirm}
+            className="px-8 py-3 bg-green-600 hover:bg-green-700 text-white font-bold rounded-full transition duration-150 shadow-xl"
+            disabled={privacyConsent}
+          >
+            I Review & Agree (Confirm Consent)
+          </button>
+        </div>
+      </Card>
+    </div>
+  );
+
+  // --- 4. Sleep Data Input Screen ---
+  const DataInputScreen = () => (
+    <div className="flex flex-col items-center justify-center h-full min-h-[60vh] text-center p-8">
+      <Card title="Provide Sleep Data" icon={Clock} className="max-w-md">
+        <p className="text-gray-300 mb-6">
+          Submit your last night's sleep duration manually.
+        </p>
+        <div className="space-y-4">
+          <button
+            onClick={handleDataSync}
+            className="w-full px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg transition duration-150 flex items-center justify-center"
+          >
+            <RefreshCw className="w-5 h-5 mr-2" /> Auto-Sync (Demo Disabled)
+          </button>
+
+          <div className="text-gray-400 uppercase text-xs font-semibold pt-2">OR</div>
+
+          <form onSubmit={handleManualInput} className="space-y-4">
+            <label htmlFor="duration" className="block text-sm font-medium text-gray-300 text-left">
+              Manual Sleep Duration (Hours)
+            </label>
+            <input
+              id="duration"
+              type="number"
+              step="0.1"
+              min="0"
+              placeholder="e.g., 7.5"
+              value={manualSleepDuration}
+              onChange={(e) => setManualSleepDuration(e.target.value)}
+              className="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-500 focus:ring-green-500 focus:border-green-500"
+              required
+            />
+            <button
+              type="submit"
+              className="w-full px-6 py-3 bg-green-600 hover:bg-green-700 text-white font-bold rounded-lg transition duration-150"
+              disabled={isLoading}
+            >
+              {isLoading ? 'Saving Data...' : 'Submit Manual Data'}
+            </button>
+          </form>
+        </div>
+        {error && <p className="text-red-400 text-sm mt-4">{error}</p>}
+      </Card>
+    </div>
+  );
+
+  // --- Components used in Dashboard and Detail Screen ---
+
+    const RecommendationsContent = () => (
+      <div className="space-y-6">
+        {recommendationsData.map((item, index) => (
+          <div key={index} className="p-4 bg-gray-700 rounded-lg border-l-4 border-green-600 shadow-inner">
+            <div className="flex items-center mb-2">
+              <item.icon className={`w-5 h-5 ${item.color} mr-3`} />
+              <h3 className="text-lg font-semibold text-white">{item.title}</h3>
+            </div>
+            <p className="text-gray-300 text-sm">{item.detail}</p>
+          </div>
+        ))}
+      </div>
+    );
+
+  // --- 6. Recommendation Detail Screen ---
+  const RecommendationDetailScreen = () => (
+    <div className="p-4 sm:p-8">
+        <button
+          onClick={() => setStep(5)}
+          className="flex items-center text-green-400 hover:text-green-300 mb-6 transition duration-150"
+        >
+          <ArrowLeft className="w-5 h-5 mr-2" /> Back to Dashboard
+        </button>
+        <Card title="Today's Comprehensive Health Recommendations" icon={Heart} className="max-w-4xl mx-auto">
+          {sleepScore > 0 ? (
+            <p className="text-gray-400 mb-6">
+                Based on your **{recoveryStatus} Recovery Status** and **{energyLevel} Energy Level** derived from last night's sleep score of **{sleepScore}/100**, here are your detailed daily strategies:
+            </p>
+          ) : (
+            <p className="text-red-400 mb-6">
+                No recent sleep data found. Please go back to the input screen to submit your sleep duration and unlock personalized recommendations.
+            </p>
+          )}
+
+          <RecommendationsContent />
+          
+          {/* New Section: Sleep Education & Resources */}
+          <h3 className="text-2xl font-bold text-white mt-10 mb-4 border-t border-gray-700 pt-6 flex items-center">
+            <Moon className="w-6 h-6 mr-3 text-indigo-400" />
+            Sleep Education & Resources
+          </h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+              <VideoCard
+                title="Importance of Quality Sleep for Athletes"
+                description="Understand how deep sleep cycles drive muscle repair, hormone regulation, and performance recovery."
+                videoId="sleep-importance"
+              />
+              <VideoCard
+                title="5 Science-Backed Hacks to Fall Asleep Faster"
+                description="Learn techniques like 4-7-8 breathing and the military method to significantly reduce sleep latency."
+                videoId="sleep-faster-hacks"
+              />
+          </div>
+          
+        </Card>
+        <div className="flex justify-center mt-8">
+          <button
+            onClick={() => console.log('Action: Recommendations Marked as Planned')}
+            className="px-8 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-full transition duration-150 shadow-xl"
+          >
+            Mark Recommendations as Planned
+          </button>
+        </div>
+    </div>
+  );
+
+
+  // --- 5. Main Dashboard Screen ---
+  const DashboardScreen = () => {
+    
+    const CardBlock = ({ title, value, unit, icon: Icon, color = 'text-green-400' }) => (
+      <div className="flex flex-col items-center p-4 bg-gray-700/50 rounded-lg">
+        <Icon className={`w-6 h-6 ${color} mb-2`} />
+        <p className="text-xs text-gray-400 uppercase font-semibold">{title}</p>
+        <p className="text-2xl font-bold text-white mt-1">{value}<span className="text-base font-normal ml-1">{unit}</span></p>
+      </div>
+    );
+
+    // --- Sub-Components for Dashboard sections ---
+
+    // Flow Step: Show Today's Recommendations (Summary View)
+    const RecommendationsSummary = () => (
+      <Card title="Today's Personalized Recommendations" icon={Heart} className="col-span-2 lg:col-span-1">
+        {/* Only show top-level summary for the dashboard view */}
+        <p className="text-gray-300 text-sm mb-3">Workout: {recommendationsData[0].detail}</p>
+        <p className="text-gray-300 text-sm mb-3">Recovery: {recommendationsData[1].detail}</p>
+        <p className="text-gray-300 text-sm">Nutrition: {recommendationsData[2].detail}</p>
+      </Card>
+    );
+    
+    // Flow Step: Show Energy Throughout the Day
+    const EnergyForecast = () => {
+      const optimalWindow = MOCK_ENERGY_FORECAST.find(f => f.level >= 80 && f.time.includes('PM'));
+      return (
+        <Card title="Energy Throughout the Day" icon={Zap} className="col-span-2 lg:col-span-1">
+          <p className="text-sm text-gray-300 mb-3">Predicted energy levels based on your sleep depth.</p>
+          <div className="flex justify-between items-end h-32 w-full bg-gray-700/50 p-2 rounded-lg relative">
+            {MOCK_ENERGY_FORECAST.map((data, index) => (
+              <div key={data.time} className="flex flex-col items-center h-full justify-end group">
+                <div
+                  className="w-4 rounded-t-full transition-all duration-500 ease-out"
+                  style={{
+                    height: `${data.level * 0.8}px`,
+                    backgroundColor: data.level >= 80 ? '#10B981' : (data.level >= 50 ? '#FBBF24' : '#F87171'),
+                  }}
+                ></div>
+                <div className="text-xs text-gray-400 mt-1">{data.time}</div>
+              </div>
+            ))}
+            {optimalWindow && (
+              <div className="absolute top-0 left-0 w-full text-center text-xs text-green-300 bg-green-900/50 py-1 rounded-t-lg font-medium">
+                Optimal Workout: {optimalWindow.time}
+              </div>
+            )}
+          </div>
+        </Card>
+      );
+    };
+
+    // Flow Step: Show Sleep Analysis (last 7 days)
+    const SleepAnalysis = () => (
+      <Card title="7-Day Sleep Analysis (Demo Data)" icon={TrendingUp} className="col-span-2">
+        <p className="text-sm text-gray-300 mb-4">Duration & Quality breakdown to spot trends.</p>
+        <div className="flex justify-between items-end h-40 w-full bg-gray-700/50 p-2 rounded-lg">
+          {MOCK_ANALYSIS.map(dayData => (
+            <div key={dayData.day} className="flex flex-col items-center h-full justify-end group">
+              {/* Quality Bar (lighter color, fixed width) */}
+              <div
+                className="w-6 rounded-t-lg bg-indigo-400/80 transition-all duration-500 ease-out relative"
+                style={{ height: `${dayData.quality * 0.9}px` }}
+              >
+                {/* Duration Overlay (darker color, narrower) */}
+                <div
+                    className="w-3 rounded-t-lg bg-indigo-600 absolute bottom-0 left-1/2 transform -translate-x-1/2"
+                    style={{ height: `${(dayData.duration / 8) * 100 * 0.9}px` }} // Scale duration to max 8hrs
+                ></div>
+              </div>
+
+              <div className="text-xs text-gray-400 mt-1">{dayData.day}</div>
+              <div className="hidden group-hover:block absolute bg-gray-900 text-xs text-white p-1 rounded -mt-10">
+                {dayData.duration}h / {dayData.quality}%
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="flex justify-center space-x-4 mt-3 text-xs">
+            <div className="flex items-center text-indigo-400"><div className="w-2 h-2 bg-indigo-600 mr-1 rounded-full"></div> Duration</div>
+            <div className="flex items-center text-indigo-400"><div className="w-2 h-2 bg-indigo-400/80 mr-1 rounded-full"></div> Quality</div>
+        </div>
+        <p className='text-xs text-gray-500 mt-3'>*This chart uses static mock data.</p>
+      </Card>
+    );
+
+    // Flow Step: Show Sleep & Energy Summary
+    const Summary = () => (
+      <Card title="Sleep & Energy Summary" icon={Moon} className="col-span-2">
+        <div className="grid grid-cols-3 gap-4">
+          <CardBlock
+            title="Sleep Score"
+            value={sleepScore}
+            unit="/100"
+            icon={Moon}
+            color={sleepScore >= 85 ? 'text-green-400' : (sleepScore > 0 ? 'text-yellow-400' : 'text-gray-400')}
+          />
+          <CardBlock
+            title="Energy Level"
+            value={energyLevel}
+            unit=""
+            icon={Zap}
+            color={energyLevel === 'High' ? 'text-green-400' : (energyLevel === 'Medium' ? 'text-yellow-400' : 'text-red-400')}
+          />
+          <CardBlock
+            title="Recovery Status"
+            value={recoveryStatus}
+            unit=""
+            icon={Heart}
+            color={recoveryStatus === 'Optimal' ? 'text-green-400' : (recoveryStatus === 'Good' ? 'text-yellow-400' : 'text-red-400')}
+          />
+        </div>
+        <p className="text-sm text-gray-400 mt-4 italic">
+            Last Night: {duration.toFixed(1)}h total sleep (Deep: {deepSleep.toFixed(1)}h, REM: {remSleep.toFixed(1)}h).
+        </p>
+        {sleepScore === 0 && (
+             <p className="text-red-400 text-sm mt-2 font-semibold">
+                Please submit data in the input screen to see personalized insights.
+            </p>
+        )}
+      </Card>
+    );
+
+    // Flow Step: End (User Action)
+    const UserAction = () => (
+        <div className="col-span-2 mt-6 p-4 text-center bg-gray-800 rounded-xl">
+            <h3 className="text-xl font-semibold text-green-300 mb-4">Your Next Action</h3>
+            <div className="flex flex-col sm:flex-row justify-center space-y-4 sm:space-y-0 sm:space-x-4">
+                <button
+                    onClick={() => setStep(6)} // Navigate to the new detailed screen
+                    className="px-8 py-3 bg-green-600 hover:bg-green-700 text-white font-bold rounded-full transition duration-150 shadow-xl"
+                    disabled={sleepScore === 0}
+                >
+                    Follow Recommendations
+                </button>
+                <button
+                    onClick={() => setStep(4)} // Back to input screen
+                    className="px-8 py-3 border border-yellow-600 text-yellow-400 hover:bg-yellow-900/50 font-bold rounded-full transition duration-150"
+                >
+                    Enter New Data
+                </button>
+            </div>
+        </div>
+    );
+
+    // Show loading spinner while Firebase initializes
+    if (!isAuthReady) {
+        return (
+            <div className="min-h-screen bg-gray-900 font-sans flex items-center justify-center">
+                <div className="flex flex-col items-center">
+                    <RefreshCw className="w-12 h-12 text-green-400 animate-spin mb-4" />
+                    <p className="text-white text-lg font-medium">Connecting to Database...</p>
+                </div>
+            </div>
+        );
+    }
+
+    return (
+      <div className="p-4 sm:p-8">
+        <h2 className="text-3xl font-bold text-white mb-6">Health Dashboard</h2>
+        <div className="grid grid-cols-2 gap-6">
+          {/* Summary (Top Row, spans 2 columns) */}
+          <Summary />
+
+          {/* Recommendations (Left Column) - Now using Summary View */}
+          <RecommendationsSummary />
+
+          {/* Energy Forecast (Right Column) */}
+          <EnergyForecast />
+
+          {/* 7-Day Analysis (Bottom Row, spans 2 columns) */}
+          <SleepAnalysis />
+
+          {/* User Action (Below all data) */}
+          <UserAction />
+        </div>
+      </div>
+    );
+  };
+
+
+  // --- Main Render Function ---
+  const renderScreen = () => {
+    switch (step) {
+      case 2:
+        return <SensorCheckScreen />;
+      case 3:
+        return <PrivacyScreen />;
+      case 4:
+        return <DataInputScreen />;
+      case 5:
+        return <DashboardScreen />;
+      case 6: // New case for recommendations detail
+        return <RecommendationDetailScreen />;
+      case 1:
+      default:
+        // Render Dashboard if auth is ready but step hasn't been set yet
+        return isAuthReady ? <DashboardScreen /> : <div className="text-center text-gray-500 p-20">Starting Application...</div>;
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-900 font-sans">
+      <Header />
+      <main className="max-w-7xl mx-auto">
+        {renderScreen()}
+      </main>
+    </div>
+  );
+};
+
+export default App;
